@@ -28,7 +28,7 @@ await d.commit("Docs: Add Flatpak packaging plan", [
 
 0.4 Work steps 1-4 with changes uncommitted; when verification passes, commit them as a second commit with the same helper: `"Build: Add Flathub packaging for Caspion"` plus body lines `- Build the app from source offline with flatpak-node-generator sources` / `- Add manifest, launcher, desktop file, metainfo and launcher/build scripts` / `- Disable Chromium sandbox and auto-update inside the Flatpak sandbox`. Never commit `dist/`, `flatpak/build-dir`, `flatpak/repo`, `flatpak/.flatpak-builder` or `flatpak/*.flatpak`.
 
-### Step 1 — Flatpak-aware main process (no behavior change outside Flatpak)
+### Step 1 — Flatpak-aware main process and Wayland window visibility
 
 1.1 New file `packages/main/src/platform.ts` (no equivalent exists; no flatpak detection anywhere in the repo):
 
@@ -129,6 +129,26 @@ test('Chromium sandbox opt-out flags are added only inside Flatpak', () => {
 
 Import only `../src/platform` (node:fs only); importing `bankScraper` would pull electron-log/electron into the test process.
 
+
+1.6 `packages/main/src/mainWindow.ts` — show the window even when `ready-to-show` never fires. A window created with `show: false` stays unmapped, an unmapped Wayland toplevel gets no frame callbacks, and without a first non-empty paint Electron emits no `ready-to-show`, so the app runs with no visible window (`APP_READY` and renderer `Frontend started` in the log, nothing in `niri msg windows`). Hoist the handler into `showWindow` and show after the load promise resolves (`loadURL`/`loadFile` resolve on `did-finish-load`), keeping `ready-to-show` as the flicker-free fast path:
+
+```ts
+  const showWindow = () => {
+    browserWindow?.show();
+
+    if (import.meta.env.DEV) {
+      browserWindow?.webContents.openDevTools();
+    }
+  };
+
+  browserWindow.on('ready-to-show', showWindow);
+  // ...loadURL/loadFile...
+  if (!browserWindow.isVisible()) {
+    showWindow();
+  }
+```
+
+Not Flatpak-specific: any Wayland session loses the event. `packages/main/tests/unit.spec.ts`'s electron mock needs `isVisible` (returning `true`) and `show` for the three window tests to keep passing.
 Gate: `yarn typecheck:main` and `yarn test:main` pass (install yarn first: `npm install -g yarn@1`).
 
 ### Step 2 — Flathub-side files (all in `flatpak/`, which becomes the submission repo root verbatim)
@@ -378,13 +398,14 @@ TMPIDX=$(mktemp); rm -f "$TMPIDX"
 GIT_INDEX_FILE="$TMPIDX" git read-tree 0f634666a8ee26cab53cb72065dcb7ac85f5db05
 GIT_INDEX_FILE="$TMPIDX" git add -N packages/main/src/platform.ts
 GIT_INDEX_FILE="$TMPIDX" git diff -- \
-  packages/main/src/platform.ts packages/main/src/backend/import/bankScraper.ts \
+  packages/main/src/platform.ts packages/main/src/mainWindow.ts \
+  packages/main/src/backend/import/bankScraper.ts \
   packages/main/src/index.ts packages/main/src/handlers/updater.ts \
   > flatpak/patches/0001-flatpak-runtime-support.patch
 rm -f "$TMPIDX"
 ```
 
-The patch must contain four file diffs (three modified, one new) and no test file. If `git diff` prints nothing, the Step 1 edits are missing — stop and redo Step 1. Regenerate it after any formatter (prettier) rewrote the sources, otherwise the patch and the committed tree disagree (in this session: a stray blank line where `const proxyArgs` used to be). Verify it applies to the pinned upstream commit before building:
+The patch must contain five file diffs (four modified, one new) and no test file. If `git diff` prints nothing, the Step 1 edits are missing — stop and redo Step 1. Regenerate it after any formatter (prettier) rewrote the sources, otherwise the patch and the committed tree disagree (in this session: a stray blank line where `const proxyArgs` used to be). Verify it applies to the pinned upstream commit before building:
 
 ```bash
 TMPW=$(mktemp -d)
@@ -420,7 +441,16 @@ ls -t ~/Pictures/Screenshots/*.png | head -1
 
 Copy that PNG to `flatpak/screenshots/main-window.png` (create the directory). If `niri msg action screenshot-window` is unavailable, use `spectacle --background --nonotify --output flatpak/screenshots/main-window.png`.
 
-Execution note (this session): the packaged window never mapped, because Caspion's renderer never emits `ready-to-show` for a window created with `show: false` on this host — reproduced with plain host Electron and a minimal harness loading only that renderer, while a trivial local HTML file with `show: false` fires it normally. That is an upstream paint stall, not a packaging defect. Diagnosis ladder that worked: (1) `niri msg windows` shows no window; (2) renderer CDP targets prove the page mounted (`document.title`, `document.body.innerText`); (3) `document.visibilityState` is `visible` but `Page.captureScreenshot`/`startScreencast` never produce a frame; (4) forcing X11 (`flatpak run --socket=x11 io.github.brafdlog.Caspion --ozone-platform=x11`) makes the window map and render, which also produced the committed screenshot. `screenshot-window` writes to `~/Pictures/Screenshots/` and captures the focused window only, so focus it first — and it needs the window to be on screen, so it cannot work while the human is switching workspaces.
+Execution note (first session): the packaged window never mapped, because `createWindow` only called `show()` from `ready-to-show` and that event never fires here — the page loads (renderer logs `Frontend started`, `document.visibilityState` is `visible`) but no frame is ever produced for a hidden window, so Chromium never reports a first non-empty paint. Diagnosis ladder that worked: (1) `niri msg windows` shows no Caspion window while `flatpak ps` lists the sandbox; (2) the log has `APP_READY` plus renderer `Frontend started`; (3) forcing X11 (`flatpak run --socket=x11 --nosocket=wayland io.github.brafdlog.Caspion --ozone-platform=x11`) maps and renders, because X11 delivers frames to unmapped windows. The verdict recorded then ("upstream paint stall, not a packaging defect") was wrong in one respect that matters: it is an app bug, and it is fixable.
+
+Root cause and fix (second session, verified): a hidden xdg_toplevel never receives Wayland frame callbacks, so `ready-to-show` can be missing and `show()` is never called. `packages/main/src/mainWindow.ts` now shows the window after `loadURL`/`loadFile` resolve (they resolve on `did-finish-load`) when it is still not visible, leaving `ready-to-show` as the fast path. Isolation that proved it, using a writable copy of the installed app (`/tmp/cpapp`) with the harness reading the real renderer out of `app.asar`:
+
+| Variant (Wayland, `--no-sandbox`) | Window |
+|---|---|
+| pristine `app.asar` | none, ever |
+| `app.asar` plus the `did-finish-load` fallback | maps, renders the accounts/exporters UI |
+
+Practical consequences: `--ozone-platform=x11` is not a usable workaround in the launcher — with `--socket=fallback-x11` + `--socket=wayland` the sandbox has no X display (`Missing X server or $DISPLAY`), so it only works with `--socket=x11 --nosocket=wayland` passed at run time. Do not "fix" this by dropping Wayland from `finish-args`; the app-side fallback keeps Wayland native and needs no extra flags. `screenshot-window` writes to `~/Pictures/Screenshots/` and captures the focused window only, so focus it first. Note the Wayland window's app id is `io.github.brafdlog.Caspion` while X11 reports `caspion`; grep `niri msg windows` for `Caspion` (case-insensitive) or a hidden-but-mapped window is easy to miss.
 
 ## Verification
 
@@ -450,7 +480,7 @@ flatpak run --command=sh io.github.brafdlog.Caspion -c 'echo "$FLATPAK_ID"; ls /
 ```
 
 (prints `io.github.brafdlog.Caspion` and the four installed metadata files).
-7. Window + app id: `flatpak run io.github.brafdlog.Caspion`, then `niri msg windows` (window App ID is `io.github.brafdlog.Caspion`, matching `StartupWMClass`/`desktopName`), and `flatpak ps` lists the app.
+7. Window on the default Wayland launch (the regression this plan got wrong once): `flatpak run io.github.brafdlog.Caspion`, then `niri msg windows | grep -i -A3 "App ID: \"io.github.brafdlog.Caspion\""` — the window must map without any `--ozone-platform` flag, and its App ID matches `StartupWMClass`/`desktopName` (X11 reports `caspion` instead). `flatpak ps` lists the app. If nothing maps, check `APP_READY` + renderer `Frontend started` in the log: a running app with no window is the `ready-to-show` miss, not a build failure.
 8. Logs after quitting: `grep -E "APP_READY|UPDATE_CHECK" ~/.var/app/io.github.brafdlog.Caspion/config/caspion/logs/main.log` — `APP_READY` present, no `UPDATE_CHECK`/`UPDATE_CHECK_ERROR` lines.
 9. keytar/libsecret round-trip: in the running app toggle a setting (e.g. "show browser"), quit, `ls ~/.var/app/io.github.brafdlog.Caspion/config/caspion/config.encrypt` (exists), reopen and confirm the setting persisted.
 10. Puppeteer Chromium inside the sandbox: run `flatpak run io.github.brafdlog.Caspion --scrape` (no accounts configured; it downloads Chromium then finishes), then
@@ -489,7 +519,7 @@ flatpak run --command=sh io.github.brafdlog.Caspion -c 'touch "$HOME/Documents/.
 - If electron extraction fails during `yarn --offline` (`@electron/get` checksum/EACCES), confirm the zips landed at `flatpak-node/cache/electron/electron-v39.8.5-linux-x64.zip` and add `ELECTRON_SKIP_BINARY_DOWNLOAD: '1'` only if you also drop the root `postinstall` electron invocation via the patch (it is needed for `.electron-vendors.cache.json`).
 - If `electron-builder` tries to fetch something (fpm/AppImage), keep `--dir` and add `-c.linux.target=dir`; if it insists on rebuilding with network, add `-c.npmRebuild=false` (keytar is already N-API/electron-ABI from `yarn --offline`).
 - If the app aborts with a Chromium sandbox error (`No usable sandbox`, `SUID sandbox helper`), change the launcher's `exec` to `exec /app/caspion/caspion --no-sandbox --ozone-platform-hint=auto "$@"`.
-- If the window is blank under Wayland, verify with `flatpak run --nosocket=wayland io.github.brafdlog.Caspion`; if that fixes it, replace `--socket=fallback-x11`+`--socket=wayland` with `--socket=x11` in `finish-args` (keep `--share=ipc`).
+- If the app runs (`APP_READY` in the log) but no window maps under Wayland, the `ready-to-show` fallback in Step 1.6 is missing from the patch — check `grep -c mainWindow flatpak/patches/0001-flatpak-runtime-support.patch` returns 1 and rebuild. Do **not** work around it with `--ozone-platform=x11` or by dropping `--socket=wayland`: the first has no X display to talk to under `fallback-x11` + `wayland`, the second loses Wayland native.
 - If the linter reports `appstream-external-screenshot-url`, the screenshot URL is not reachable/mirrorable yet — it must exist on `master` before the submission PR; until then keep the local file and submit after merge.
 - Not a packaging defect: `.env` is committed with empty `VITE_GOOGLE_CLIENT_ID`/`VITE_GOOGLE_CLIENT_SECRET`, so Google Sheets login is unavailable in any build from this repo; leave OAuth code untouched.
 

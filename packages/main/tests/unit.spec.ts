@@ -18,8 +18,10 @@ vi.mock('electron', () => {
   bw.prototype.destroy = vi.fn();
   bw.prototype.isDestroyed = vi.fn();
   bw.prototype.isMinimized = vi.fn();
+  bw.prototype.isVisible = vi.fn(() => true);
   bw.prototype.focus = vi.fn();
   bw.prototype.restore = vi.fn();
+  bw.prototype.show = vi.fn();
 
   const app: Pick<Electron.App, 'getAppPath'> = {
     getAppPath(): string {
