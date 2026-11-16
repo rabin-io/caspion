@@ -306,14 +306,24 @@ cd "${REPO_ROOT}"
 # Tooling in the user installation: no root, no distro flatpak-builder required.
 flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install --user -y flathub org.flatpak.Builder
-
-flatpak run --user --command=flatpak-builder --share=network --filesystem=home org.flatpak.Builder \
-  --user --install --force-clean --disable-rofiles-fd \
-  --state-dir="${FLATPAK_DIR}/.flatpak-builder" \
-  --repo="${FLATPAK_DIR}/repo" \
-  --install-deps-from=flathub \
-  "${FLATPAK_DIR}/build-dir" \
-  "${FLATPAK_DIR}/${APP_ID}.yml"
+# The Builder sandbox cannot resolve the flathub remote, so runtime/SDK/BaseApp/node22 are installed host-side.
+flatpak install --user -y flathub \
+  org.freedesktop.Platform//26.08 \
+  org.freedesktop.Sdk//26.08 \
+  org.freedesktop.Sdk.Extension.node22//26.08 \
+  org.electronjs.Electron2.BaseApp//26.08
+# XDG_DATA_HOME must be exported inside the builder: flatpak-builder forwards its env with CLEAR_ENV
+# when it spawns `flatpak info` on the host, and the sandbox value points at the app's empty data
+# dir, which makes runtime/SDK/BaseApp lookups fail with "not installed".
+flatpak run --user --command=sh --share=network --filesystem=home org.flatpak.Builder -c "
+  export XDG_DATA_HOME=\$HOME/.local/share
+  exec flatpak-builder \
+    --user --install --force-clean \
+    --state-dir=${FLATPAK_DIR}/.flatpak-builder \
+    --repo=${FLATPAK_DIR}/repo \
+    ${FLATPAK_DIR}/build-dir \
+    ${FLATPAK_DIR}/${APP_ID}.yml
+"
 
 flatpak build-bundle "${FLATPAK_DIR}/repo" "${FLATPAK_DIR}/${APP_ID}.flatpak" "${APP_ID}"
 ```
@@ -362,12 +372,27 @@ This installs `io.github.brafdlog.Caspion` for the current user and writes `flat
 
 ```bash
 mkdir -p flatpak/patches
-git add -N packages/main/src/platform.ts
-git diff -- packages/main/src/platform.ts packages/main/src/backend/import/bankScraper.ts packages/main/src/index.ts packages/main/src/handlers/updater.ts > flatpak/patches/0001-flatpak-runtime-support.patch
-git reset -- packages/main/src/platform.ts
+# Diff the pinned commit tree against the worktree through a throwaway index: no `git add -N` +
+# `git reset` on the real index, which would disturb concurrent commit tooling.
+TMPIDX=$(mktemp); rm -f "$TMPIDX"
+GIT_INDEX_FILE="$TMPIDX" git read-tree 0f634666a8ee26cab53cb72065dcb7ac85f5db05
+GIT_INDEX_FILE="$TMPIDX" git add -N packages/main/src/platform.ts
+GIT_INDEX_FILE="$TMPIDX" git diff -- \
+  packages/main/src/platform.ts packages/main/src/backend/import/bankScraper.ts \
+  packages/main/src/index.ts packages/main/src/handlers/updater.ts \
+  > flatpak/patches/0001-flatpak-runtime-support.patch
+rm -f "$TMPIDX"
 ```
 
-The patch must contain four file diffs (three modified, one new) and no test file. If `git diff` prints nothing, the Step 1 edits are missing — stop and redo Step 1.
+The patch must contain four file diffs (three modified, one new) and no test file. If `git diff` prints nothing, the Step 1 edits are missing — stop and redo Step 1. Regenerate it after any formatter (prettier) rewrote the sources, otherwise the patch and the committed tree disagree (in this session: a stray blank line where `const proxyArgs` used to be). Verify it applies to the pinned upstream commit before building:
+
+```bash
+TMPW=$(mktemp -d)
+git archive 0f634666a8ee26cab53cb72065dcb7ac85f5db05 | tar -x -C "$TMPW"
+(cd "$TMPW" && git init -q . && git apply --check "$OLDPWD/flatpak/patches/0001-flatpak-runtime-support.patch" \
+  && echo PATCH_APPLIES_TO_UPSTREAM)
+rm -rf "$TMPW"
+```
 
 3.2 Generate the offline dependency list (needs network; ~1.3 MB output for this lockfile):
 
@@ -394,6 +419,8 @@ ls -t ~/Pictures/Screenshots/*.png | head -1
 ```
 
 Copy that PNG to `flatpak/screenshots/main-window.png` (create the directory). If `niri msg action screenshot-window` is unavailable, use `spectacle --background --nonotify --output flatpak/screenshots/main-window.png`.
+
+Execution note (this session): the packaged window never mapped, because Caspion's renderer never emits `ready-to-show` for a window created with `show: false` on this host — reproduced with plain host Electron and a minimal harness loading only that renderer, while a trivial local HTML file with `show: false` fires it normally. That is an upstream paint stall, not a packaging defect. Diagnosis ladder that worked: (1) `niri msg windows` shows no window; (2) renderer CDP targets prove the page mounted (`document.title`, `document.body.innerText`); (3) `document.visibilityState` is `visible` but `Page.captureScreenshot`/`startScreencast` never produce a frame; (4) forcing X11 (`flatpak run --socket=x11 io.github.brafdlog.Caspion --ozone-platform=x11`) makes the window map and render, which also produced the committed screenshot. `screenshot-window` writes to `~/Pictures/Screenshots/` and captures the focused window only, so focus it first — and it needs the window to be on screen, so it cannot work while the human is switching workspaces.
 
 ## Verification
 
@@ -465,3 +492,75 @@ flatpak run --command=sh io.github.brafdlog.Caspion -c 'touch "$HOME/Documents/.
 - If the window is blank under Wayland, verify with `flatpak run --nosocket=wayland io.github.brafdlog.Caspion`; if that fixes it, replace `--socket=fallback-x11`+`--socket=wayland` with `--socket=x11` in `finish-args` (keep `--share=ipc`).
 - If the linter reports `appstream-external-screenshot-url`, the screenshot URL is not reachable/mirrorable yet — it must exist on `master` before the submission PR; until then keep the local file and submit after merge.
 - Not a packaging defect: `.env` is committed with empty `VITE_GOOGLE_CLIENT_ID`/`VITE_GOOGLE_CLIENT_SECRET`, so Google Sheets login is unavailable in any build from this repo; leave OAuth code untouched.
+
+## Execution notes — what actually happened (2026-11-16)
+
+Recorded after the build landed, so a second run is a copy-paste rather than a rediscovery. The sections above are already corrected; this section explains why, and records what was guessed in the plan and is now confirmed.
+
+### Outcome
+
+| Item | Value |
+|---|---|
+| Commits | `Docs: Add Flatpak packaging plan`, `Build: Add Flathub packaging for Caspion` |
+| Build wall time | ~8 min build + ~2 min source download (first run); most of it is `libsecret`, 979 npm sources and the Electron unpack |
+| `generated-sources.json` | 979 sources, 401 KB (far under the 25 MB directory limit — no `-s` split needed) |
+| Bundle | `flatpak/io.github.brafdlog.Caspion.flatpak`, 94 MB |
+| Version shown by `flatpak list` | `2.19.9`, from the newest `<release>` in the metainfo, not from `package.json` (`2.0.0`) |
+| Tests | `yarn test:main`: 5 files / 46 tests; `yarn typecheck:main`: 7.9 s, clean |
+
+### Four traps between "manifest looks right" and "build succeeds"
+
+1. `Option parsing failed: Unknown option --disable-rofiles-fd` — flatpak-builder 1.4.12 has no such option (`--disable-rofiles-fuse` exists and is unnecessary). Delete the flag rather than translating it.
+2. `error: No remote refs found for 'flathub'` when `--install-deps-from=flathub` runs inside the Builder sandbox. Install runtime, SDK, `node22` and `Electron2.BaseApp` host-side (idempotent) and drop `--install-deps-from`.
+3. `error: org.freedesktop.Sdk/x86_64/26.08 not installed` + `Failed to init: Unable to find sdk org.freedesktop.Sdk version 26.08`, even though `flatpak --user info` finds it. Root cause: `builder_maybe_host_spawnv()` runs `flatpak info … --show-commit` on the host with `FLATPAK_HOST_COMMAND_FLAGS_CLEAR_ENV`, forwarding this process's `XDG_DATA_HOME` — inside the sandbox that is `~/.var/app/org.flatpak.Builder/data`, which on the host is the Builder's own empty data dir, so the user installation looks empty. `flatpak run --env=XDG_DATA_HOME=…` does **not** work (Flatpak overrides it for apps); export it in the `sh -c` wrapper. `--verbose` is what reveals it: `FB: Running 'flatpak info --arch=x86_64 --show-commit org.freedesktop.Sdk 26.08' on host`.
+4. `prebuild-install warn install getaddrinfo EAI_AGAIN github.com`, then `build native dependency from sources name=keytar` — the correct offline path, not a failure. It works because `npm_config_target`/`npm_config_runtime`/`npm_config_nodedir` and the `~/.electron-gyp` symlink are set; those were right first try.
+
+### Guesses in the plan that are now confirmed
+
+- `flatpak-node-generator` does **not** write `electron-builder-arch-args.sh` to disk: it emits a `type: script` source inside `generated-sources.json` that flatpak-builder materialises in the build dir, so `. flatpak-node/electron-builder-arch-args.sh` is valid. Checking for the file before building is a false alarm.
+- Electron zips land at `flatpak-node/cache/electron/electron-v39.8.5-linux-<arch>.zip` via `dest` + `dest-filename`; the headers archive uses `strip-components: 1` into `flatpak-node/cache/node-gyp/39.8.5/`, exactly what `npm_config_nodedir` expects.
+- 945 of the 979 sources are yarn-mirror tarballs (`dest: flatpak-node/yarn-mirror`, `dest-filename: <pkg>-<ver>.tgz`). The yarn provider presseeds no `npm-cache`, so `npm_config_cache` is just created at build time.
+- The node22 SDK extension does ship `yarn` 1.22.22, so the yarn-source contingency is unnecessary.
+- `appstreamcli compose` cannot mirror the screenshot offline, and Flathub's upload pipeline is what creates the `screenshots/<arch>` ref plus the `dl.flathub.org/media` copy. The `repo` lint mode can therefore never pass locally; the pre-submission gate is `flatpak-builder-lint manifest <file>.yml` → exit 0.
+- Under X11 Electron reports `WM_CLASS` `caspion` (from `productName`); Wayland uses the injected `desktopName` (`io.github.brafdlog.Caspion.desktop`). `StartupWMClass=io.github.brafdlog.Caspion` matches only the Wayland app id — align it if X11 icon association matters.
+- `flatpak ps` lists two sandboxes per app (bwrap parent + `zypak-helper` zygote child). Normal, not a double launch.
+
+### Verification shortcuts worth reusing
+
+```bash
+# Updater really is disabled: APP_READY present, zero UPDATE_CHECK* lines.
+grep -cE "UPDATE_CHECK" ~/.var/app/io.github.brafdlog.Caspion/config/caspion/logs/main.log   # 0
+
+# Packaged native module loads (no keyring interaction, so it cannot hang).
+flatpak run --env=ELECTRON_RUN_AS_NODE=1 --command=sh --filesystem=/tmp io.github.brafdlog.Caspion \
+  -c '/app/caspion/caspion /tmp/keytar-load.js'
+
+# The browser the scraper launches actually starts in the sandbox.
+flatpak run --command=sh io.github.brafdlog.Caspion -c \
+  'CHROME=$(find "$HOME/.var/app/io.github.brafdlog.Caspion/config" -name chrome -type f | head -1);
+   "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage --dump-dom about:blank'
+
+# Fast end-to-end proof: --scrape with no accounts downloads Chromium, runs the exporters and
+# writes ~/Documents/transaction.csv — the entire justification for --filesystem=xdg-documents.
+flatpak run io.github.brafdlog.Caspion --scrape; echo exit=$?
+```
+
+Two verification steps cannot pass on a host without an interactive keyring or a mapped window; both were reproduced outside Flatpak to prove the sandbox is not the cause:
+
+- **keytar secret round-trip.** `setPassword` blocks on an interactive gnome-keyring prompt, and `secret-tool store` on the bare host times out identically. Prove correctness by loading the module plus `ls /app/lib/libsecret-1.so.0*` against the runtime's `/usr/lib/x86_64-linux-gnu/libsecret-1.so.0`.
+- **window mapping.** See the Step 4.2 execution note: the paint stall reproduces with plain host Electron, no Flatpak involved.
+
+### Keep build artifacts out of the worktree
+
+`.gitignore` them **and** keep them outside the repo. With `flatpak/.flatpak-builder` (1.3 GB), `flatpak/build-dir` (446 MB) and `flatpak/repo` (140 MB) in the tree, the repo's `nano-staged` pre-commit hook runs `eslint --cache --fix` and dies with `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory` at a 4 GB heap, aborting with `Restoring to original state because of errors`. Moving those three directories out (leaving only the `.flatpak` bundle) makes the identical commit succeed immediately. `--no-verify` is not the fix.
+
+### Ordering rule for the patch
+
+Generate `patches/0001-*.patch` **after** the last formatter pass and commit it with the source edits. This session committed a patch still carrying a blank line that prettier had already removed from the tree, and needed an amend. `git apply --check` against a `git archive` of the pinned commit is the cheap guard.
+
+### Faster path next time
+
+1. `yarn install --frozen-lockfile`, then `yarn test:main` / `yarn typecheck:main`: the app-side changes are independent of packaging and cheap to prove.
+2. Write the `flatpak/` files and generate `generated-sources.json` (94 s with a warm uvx cache) before starting any build. Each full `bash flatpak/build.sh` is ~10 min, so avoid speculative rebuilds — read the log tail and fix everything at once.
+3. Shake out traps 1–3 without paying for the app module: the host-side dependency install in the corrected `build.sh`, then `flatpak-builder --install-deps-only --verbose …` inside the Builder sandbox.
+4. Validate `metainfo.xml`, `.desktop` and the manifest before building; all four validators take seconds and catch the linter errors that otherwise surface 10 minutes in.
