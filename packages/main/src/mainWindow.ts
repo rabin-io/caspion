@@ -33,14 +33,6 @@ async function createWindow() {
   browserWindow.on('ready-to-show', showWindow);
 
   /**
-   * `ready-to-show` requires a first non-empty paint. A hidden toplevel on
-   * Wayland never receives frame callbacks, so that event can be missing
-   * entirely and the window would stay invisible forever. `loadURL`/`loadFile`
-   * resolve on `did-finish-load`, so show the window there when the event above
-   * has not already done it.
-   */
-
-  /**
    * Load the main page of the main window.
    */
   if (import.meta.env.DEV && import.meta.env.VITE_DEV_SERVER_URL !== undefined) {
@@ -61,6 +53,13 @@ async function createWindow() {
     await browserWindow.loadFile(fileURLToPath(new URL('./../../renderer/dist/index.html', import.meta.url)));
   }
 
+  /**
+   * `ready-to-show` requires a first non-empty paint. A hidden toplevel on
+   * Wayland never receives frame callbacks, so that event can be missing
+   * entirely and the window would stay invisible forever. `loadURL`/`loadFile`
+   * resolve on `did-finish-load`, so show the window there when the event above
+   * has not already done it.
+   */
   if (!browserWindow.isVisible()) {
     showWindow();
   }
