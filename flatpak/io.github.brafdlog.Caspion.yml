@@ -1,0 +1,81 @@
+id: io.github.brafdlog.Caspion
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: '26.08'
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node22
+command: caspion
+separate-locales: false
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --talk-name=org.freedesktop.secrets
+  - --filesystem=xdg-documents
+  - --env=ELECTRON_TRASH=gio
+  - --env=XCURSOR_PATH=/run/host/user-share/icons:/run/host/share/icons
+modules:
+  - name: libsecret
+    buildsystem: meson
+    config-opts:
+      - -Dmanpage=false
+      - -Dcrypto=disabled
+      - -Dvapi=false
+      - -Dgtk_doc=false
+      - -Dintrospection=false
+      - -Dbash_completion=disabled
+    cleanup:
+      - /bin
+      - /include
+      - /lib/pkgconfig
+      - /share/man
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/libsecret/0.21/libsecret-0.21.7.tar.xz
+        sha256: 6b452e4750590a2b5617adc40026f28d2f4903de15f1250e1d1c40bfd68ed55e
+  - name: caspion
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/node22/bin
+      env:
+        XDG_CACHE_HOME: /run/build/caspion/flatpak-node/cache
+        electron_config_cache: /run/build/caspion/flatpak-node/cache/electron
+        npm_config_cache: /run/build/caspion/flatpak-node/npm-cache
+        npm_config_offline: 'true'
+        npm_config_build_from_source: 'true'
+        npm_config_target: 39.8.5
+        npm_config_runtime: electron
+        npm_config_nodedir: /run/build/caspion/flatpak-node/cache/node-gyp/39.8.5
+    build-commands:
+      - HOME=$PWD yarn config --offline set yarn-offline-mirror $FLATPAK_BUILDER_BUILDDIR/flatpak-node/yarn-mirror
+      - ln -s $XDG_CACHE_HOME/node-gyp $HOME/.electron-gyp
+      - yarn --offline --frozen-lockfile
+      - |
+        node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.desktopName="io.github.brafdlog.Caspion.desktop";fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
+      - MODE=production yarn build
+      - . flatpak-node/electron-builder-arch-args.sh; node_modules/.bin/electron-builder build --config electron-builder.yml --dir --publish never $ELECTRON_BUILDER_ARCH_ARGS
+      - cp -a dist/linux*unpacked /app/caspion
+      - install -Dm755 caspion-launcher.sh /app/bin/caspion
+      - install -Dm644 io.github.brafdlog.Caspion.desktop /app/share/applications/io.github.brafdlog.Caspion.desktop
+      - install -Dm644 io.github.brafdlog.Caspion.metainfo.xml /app/share/metainfo/io.github.brafdlog.Caspion.metainfo.xml
+      - install -Dm644 io.github.brafdlog.Caspion.png /app/share/icons/hicolor/512x512/apps/io.github.brafdlog.Caspion.png
+      - install -Dm644 LICENSE /app/share/licenses/io.github.brafdlog.Caspion/LICENSE
+    sources:
+      - type: git
+        url: https://github.com/brafdlog/caspion.git
+        commit: 0f634666a8ee26cab53cb72065dcb7ac85f5db05
+      - type: patch
+        path: patches/0001-flatpak-runtime-support.patch
+      - generated-sources.json
+      - type: file
+        path: caspion-launcher.sh
+      - type: file
+        path: io.github.brafdlog.Caspion.desktop
+      - type: file
+        path: io.github.brafdlog.Caspion.metainfo.xml
+      - type: file
+        path: io.github.brafdlog.Caspion.png

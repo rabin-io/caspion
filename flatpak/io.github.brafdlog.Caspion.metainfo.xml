@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.brafdlog.Caspion</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Caspion</name>
+  <summary>Automated expense tracking from Israeli banks and credit cards</summary>
+  <developer id="io.github.brafdlog">
+    <name>brafdlog</name>
+  </developer>
+  <description>
+    <p>Caspion fetches transactions from Israeli banks and credit cards and exports them to Google Sheets, YNAB, CSV or JSON files.</p>
+  </description>
+  <launchable type="desktop-id">io.github.brafdlog.Caspion.desktop</launchable>
+  <url type="homepage">https://github.com/brafdlog/caspion</url>
+  <url type="bugtracker">https://github.com/brafdlog/caspion/issues</url>
+  <categories>
+    <category>Office</category>
+  </categories>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/brafdlog/caspion/master/flatpak/screenshots/main-window.png</image>
+      <caption>Accounts and exporters configuration</caption>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.19.9" date="2026-09-22"/>
+  </releases>
+</component>

@@ -46,6 +46,9 @@ You can run Caspion from the command line without opening the UI. This is useful
 # Linux
 /path/to/caspion --scrape
 
+# Flatpak
+flatpak run io.github.brafdlog.Caspion --scrape
+
 # Windows
 "C:\Program Files\caspion\caspion.exe" --scrape
 ```
@@ -162,6 +165,16 @@ For M1 macs, if you get an error while scraping due to not being able to downloa
 ### Building for production
 
 - Run `yarn build`
+
+### Building a Flatpak (Linux)
+
+The Flatpak builds the app from source inside the sandbox, so it needs `flatpak` only (no root, no distro `flatpak-builder`):
+
+```bash
+bash flatpak/build.sh
+```
+
+This installs `io.github.brafdlog.Caspion` for the current user and writes `flatpak/io.github.brafdlog.Caspion.flatpak`. See [`flatpak/README.md`](flatpak/README.md) for running it, regenerating dependency sources and the Flathub submission steps.
 
 ### YNAB integration setup (optional)
 

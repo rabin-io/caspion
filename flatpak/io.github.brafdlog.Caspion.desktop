@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Caspion
+Comment=Automated expense tracking from Israeli banks and credit cards
+Exec=caspion
+Icon=io.github.brafdlog.Caspion
+Terminal=false
+Type=Application
+Categories=Office;
+Keywords=expenses;budget;ynab;bank;finance;
+StartupNotify=true
+StartupWMClass=io.github.brafdlog.Caspion

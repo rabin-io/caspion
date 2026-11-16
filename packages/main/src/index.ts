@@ -8,6 +8,7 @@ import { logAppEvent } from './logging/operationLogger';
 import { scrapeAndUpdateOutputVendors } from './backend';
 import { getConfig } from './backend/configManager/configManager';
 import { BudgetTrackingEventEmitter } from './backend/eventEmitters/EventEmitter';
+import { isFlatpak } from './platform';
 
 const isCliScrape = process.argv.includes('--scrape');
 
@@ -116,7 +117,7 @@ app
  * if you compile production app without publishing it to distribution server.
  * Like `yarn compile` does. It's ok 😅
  */
-if (import.meta.env.PROD && !isCliScrape) {
+if (import.meta.env.PROD && !isCliScrape && !isFlatpak) {
   app
     .whenReady()
     .then(async () => {

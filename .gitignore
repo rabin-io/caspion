@@ -67,3 +67,9 @@ transaction.csv
 
 # local cache
 /userData
+
+# flatpak packaging artifacts
+/flatpak/build-dir
+/flatpak/repo
+/flatpak/.flatpak-builder
+/flatpak/*.flatpak
